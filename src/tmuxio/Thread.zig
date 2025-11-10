@@ -54,7 +54,7 @@ pub fn threadMain(self: *Thread, io: *tmuxio.Tmuxio) void {
 fn threadMain_(self: *Thread, io: *tmuxio.Tmuxio) !void {
     defer log.debug("IO thread exited", .{});
 
-    var cb: CallbackData = .{ .self = self };
+    var cb: CallbackData = .{ .self = self, .io = io };
 
     try io.threadEnter(self, &cb.data);
     defer cb.data.deinit();
@@ -69,6 +69,7 @@ fn threadMain_(self: *Thread, io: *tmuxio.Tmuxio) !void {
         cmd
     ) catch {};
 
+    io.mailbox.wakeup.wait(&self.loop, &self.wakeup_c, CallbackData, &cb, wakeupCallback);
     self.stop.wait(&self.loop, &self.stop_c, CallbackData, &cb, stopCallback);
 
     log.debug("starting IO thread", .{});
@@ -78,6 +79,7 @@ fn threadMain_(self: *Thread, io: *tmuxio.Tmuxio) !void {
 
 const CallbackData = struct {
     self: *Thread,
+    io: *tmuxio.Tmuxio,
     data: tmuxio.Tmuxio.ThreadData = undefined,
 };
 
@@ -85,7 +87,16 @@ fn drainMailbox(
     self: *Thread,
     cb: *CallbackData,
 ) !void {
-        _ = self; _ = cb;
+    const mailbox = cb.io.mailbox;
+    const io = cb.io;
+    const td = &cb.data;
+
+    while (mailbox.pop()) |message| {
+        log.info("mailbox message={s}", .{ @tagName(message) });
+        switch (message) {
+            .request_cursor_line => try io.requestCursorLine(self.alloc, td),
+        }
+    }
 }
 
 fn wakeupCallback(

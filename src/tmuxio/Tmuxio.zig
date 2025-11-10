@@ -4,33 +4,47 @@ const Tmuxio = @This();
 const xev = @import("xev").Dynamic;
 const tmuxio = @import("main.zig");
 const tmux = @import("../tmux/main.zig");
-const SegmentedPool = @import("../datastruct/main.zig").SegmentedPool;
+const datastruct = @import("../datastruct/main.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.Tmuxio);
 const posix = std.posix;
 const Stream = tmux.Stream;
 const StreamHandler = tmuxio.StreamHandler;
+const SegmentedPool = datastruct.SegmentedPool;
+const BlockingQueue = datastruct.BlockingQueue;
 
 subprocess: SubProcess,
+mailbox: Mailbox,
 stream: Stream(StreamHandler),
 
-pub fn init(alloc: Allocator, app_mailbox: App.Mailbox) Tmuxio {
+pub fn init(
+    alloc: Allocator,
+    app_mailbox: App.Mailbox
+) !Tmuxio {
     var subprocess = SubProcess.init(alloc);
     errdefer subprocess.deinit();
 
-    var handler: StreamHandler = .init(app_mailbox);
+    var mailbox = try Mailbox.init(alloc);
+    errdefer mailbox.deinit(alloc);
+    
+    var handler: StreamHandler = .init(app_mailbox, mailbox);
     errdefer handler.deinit();
     
     var stream: Stream(StreamHandler) = .init(alloc, handler);
     errdefer stream.deinit();
-    
-    return .{ .subprocess = subprocess, .stream = stream };
+
+    return .{
+        .subprocess = subprocess,
+        .stream = stream,
+        .mailbox = mailbox,
+    };
 }
 
-pub fn deinit(self: *Tmuxio) void {
+pub fn deinit(self: *Tmuxio, alloc: Allocator) void {
     self.subprocess.deinit();
     self.stream.deinit();
+    self.mailbox.deinit(alloc);
 }
 
 pub fn threadEnter(
@@ -180,6 +194,51 @@ pub fn processOutput(self: *Tmuxio, buf: []const u8) void {
     for (buf) |byte| self.stream.next(byte) catch {};
 }
 
+pub fn requestCursorLine(self: *Tmuxio, alloc: Allocator, td: *ThreadData) !void {
+    try self.queueWrite(
+        alloc,
+        td,
+        "capture-pane -p -t 0 -S 0 -E 0\n"
+    );
+}
+
+pub const Message = union(enum) {
+    request_cursor_line,
+};
+
+pub const Mailbox = struct {
+    pub const Queue = BlockingQueue(Message, 64);
+
+    queue: *Queue,
+    wakeup: xev.Async,
+
+    pub fn init(alloc: Allocator) !Mailbox {
+        const queue = try alloc.create(Queue);
+        errdefer alloc.destroy(queue);
+        queue.* = .{};
+
+        const wakeup = try xev.Async.init();
+        errdefer wakeup.deinit();
+
+        return .{ .queue = queue, .wakeup = wakeup };
+    }
+
+    pub fn deinit(self: *Mailbox, alloc: Allocator) void {
+        alloc.destroy(self.queue);
+        self.wakeup.deinit();
+    }
+
+    pub fn push(self: Mailbox, message: Message, timeout: Queue.Timeout) !Queue.Size {
+        const result = self.queue.push(message, timeout);
+        try self.wakeup.notify();
+        return result;
+    }
+
+    pub fn pop(self: Mailbox) ?Message {
+        return self.queue.pop();
+    }
+};
+    
 pub const ThreadData = struct {
     const WRITE_REQ_PREALLOC = std.math.pow(usize, 2, 5);
     

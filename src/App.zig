@@ -30,8 +30,8 @@ pub fn create(alloc: Allocator) !*App {
 
     const app_mailbox: Mailbox = .{ .app = app_ptr, .mailbox = &app_ptr.mailbox };
 
-    app_ptr.io = .init(alloc, app_mailbox);
-    errdefer app_ptr.io.deinit();
+    app_ptr.io = try .init(alloc, app_mailbox);
+    errdefer app_ptr.io.deinit(alloc);
     
     app_ptr.io_thread = try .init(alloc);
     app_ptr.io_thr = try std.Thread.spawn(
@@ -45,12 +45,13 @@ pub fn create(alloc: Allocator) !*App {
 }
 
 pub fn destroy(self: *App) void {
+    log.info("destroying app", .{});
     {
         self.io_thread.stop.notify() catch
             log.err("error in notifying the io thread to stop", .{});
         self.io_thr.join();
         self.io_thread.deinit();
-        self.io.deinit();
+        self.io.deinit(self.alloc);
 
     }
     self.alloc.destroy(self);
